@@ -467,3 +467,57 @@ OS 커널 업데이트 없이 QUIC 라이브러리 업데이트만으로 혼잡 
 | HOL Blocking | 전체 연결 블로킹 | 해당 스트림만 대기 |
 | 혼잡 제어 | OS 커널 | QUIC 레이어 (업데이트 용이) |
 | 순서 보장 | 전체 연결 단위 | 스트림 단위 |
+
+## 17. DNS HTTPS 레코드(SVCB/HTTPS RR)란 무엇인가요?
+
+### 답변
+
+**DNS HTTPS 레코드(HTTPS RR)** 는 DNS에 HTTPS 연결에 필요한 정보를 미리 게시해두는 새로운 DNS 레코드 타입입니다(RFC 9460, 2023년 표준화).  
+기존 A/AAAA 레코드가 IP 주소만 알려줬다면, HTTPS RR은 **어떤 프로토콜로, 어떤 포트로, 어떤 암호화 파라미터로 연결해야 하는지**까지 DNS 단계에서 전달합니다.
+
+**배경 - 기존 방식의 문제점:**  
+클라이언트가 `http://example.com`에 처음 접속하면, 서버는 HTTPS로 리다이렉트하거나 HSTS 헤더를 응답합니다.  
+이 과정에서 **최소 1번의 평문 HTTP 요청이 발생**하고, 그 사이에 공격자가 개입할 수 있습니다(**SSL Stripping 공격**).  
+HTTP/3(QUIC)도 마찬가지로, 클라이언트가 서버가 QUIC을 지원하는지 모르면 처음엔 TCP로 연결한 후 `Alt-Svc` 헤더를 받아야 했습니다.
+
+**HTTPS RR의 동작 방식:**
+
+```
+[기존 방식]
+1. DNS 쿼리 → IP 주소만 획득
+2. HTTP로 접속 시도 (평문 노출 위험)
+3. 서버 응답: 301 → HTTPS로 리다이렉트
+4. HTTPS 재연결
+
+[HTTPS RR 방식]
+1. DNS 쿼리 → IP + 지원 프로토콜(h3, h2) + 포트 + ECH 키 등 획득
+2. 처음부터 HTTPS + HTTP/3으로 바로 연결
+```
+
+**레코드 구조 예시:**
+
+```
+example.com.  HTTPS  1 . alpn="h3,h2" ipv4hint=93.184.216.34 ech=...
+```
+
+- `alpn`: 지원하는 프로토콜 (`h3` = HTTP/3, `h2` = HTTP/2)
+- `ipv4hint` / `ipv6hint`: 연결에 사용할 IP 힌트
+- `port`: 기본 443이 아닌 포트 사용 시 명시
+- `ech`: ECH(Encrypted Client Hello) 공개키 — TLS 핸드셰이크의 SNI까지 암호화
+
+**HTTPS RR이 해결하는 문제들:**
+
+| 문제 | 해결 방식 |
+|------|---------|
+| 평문 HTTP 첫 요청 노출 | DNS 단계에서 HTTPS 강제 → 처음부터 암호화 연결 |
+| HTTP/3 지원 여부 미리 알 수 없음 | `alpn=h3` 정보로 바로 QUIC 연결 가능 |
+| SNI 노출(어느 도메인 접속하는지 평문 노출) | ECH 파라미터 제공으로 TLS 핸드셰이크 전체 암호화 가능 |
+
+**SVCB RR과의 관계:**  
+HTTPS RR은 SVCB(Service Binding) RR의 특수화된 버전입니다.  
+SVCB는 범용 서비스 바인딩 레코드이고, HTTPS RR은 HTTPS 전용으로 특화된 타입입니다.
+
+**실무 포인트:**  
+- 주요 브라우저(Chrome, Firefox, Safari)와 클라우드 CDN(Cloudflare, AWS)이 이미 지원합니다.
+- HTTPS RR을 활용하면 최초 접속부터 HTTP/3를 사용할 수 있어 연결 지연을 추가로 줄일 수 있습니다.
+- 단, DNS 응답 자체는 평문이므로 HTTPS RR의 완전한 효과를 위해서는 **DoH(DNS over HTTPS)** 또는 **DoT(DNS over TLS)** 와 함께 사용하는 것이 권장됩니다.
